@@ -24,6 +24,8 @@ try {
 } catch {}
 
 function isDirectMedia(url) {
+  const knownPlatforms = /(youtube\.com|youtu\.be|twitter\.com|x\.com|tiktok\.com|instagram\.com|twitch\.tv)/i;
+  if (knownPlatforms.test(url)) return false;
   return /\.(mp4|mkv|webm|mov|m4v|m3u8)(\?.*)?$/i.test(url);
 }
 
@@ -84,11 +86,57 @@ class VideoPlayer {
       }
 
       const proc = youtubedl.exec(input, ytdlOpts);
+
+      let stderrBuf = "";
+      proc.stderr?.on("data", (chunk) => {
+        stderrBuf += chunk.toString();
+      });
+
+      let gotData = false;
+
       proc.catch((err) => {
         if (!this.abortCtrl?.signal.aborted) {
           log.error(`yt-dlp error: ${err.message}`);
+          if (stderrBuf) log.error(`yt-dlp stderr: ${stderrBuf.slice(0, 500)}`);
         }
       });
+
+      // تحقق فعلي إن فيه بيانات صالحة راجعة من yt-dlp قبل ما نمررها لـ ffmpeg
+      try {
+        await new Promise((resolve, reject) => {
+          const timer = setTimeout(() => {
+            if (!gotData) {
+              reject(new Error(`فشل استخراج الرابط (yt-dlp) - انتهى الوقت: ${stderrBuf.slice(0, 300) || "لا توجد بيانات"}`));
+            }
+          }, 8000);
+
+          proc.stdout.once("data", () => {
+            gotData = true;
+            clearTimeout(timer);
+            resolve();
+          });
+
+          proc.once("exit", (code) => {
+            if (code !== 0 && !gotData) {
+              clearTimeout(timer);
+              reject(new Error(`yt-dlp خرج بكود ${code}: ${stderrBuf.slice(0, 300)}`));
+            }
+          });
+
+          proc.once("error", (err) => {
+            clearTimeout(timer);
+            reject(err);
+          });
+        });
+      } catch (err) {
+        cleanup = () => {
+          try {
+            if (!proc.killed) proc.kill();
+          } catch {}
+        };
+        cleanup();
+        throw err;
+      }
 
       input = proc.stdout;
       cleanup = () => {
